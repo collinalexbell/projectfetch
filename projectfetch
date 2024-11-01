@@ -1,0 +1,634 @@
+#!/bin/python
+
+
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.columns import Columns
+from rich.text import Text
+from datetime import datetime
+import os
+import subprocess
+from typing import Dict, Callable, Tuple
+import git
+from pathlib import Path
+import pyfiglet
+import time
+import fnmatch
+from typing import Set, List
+
+
+
+
+
+
+
+
+from rich.console import Console
+from rich.table import Table
+from rich.panel import Panel
+from rich.columns import Columns
+from rich.text import Text
+from datetime import datetime
+import os
+import subprocess
+from typing import Dict, Callable, Tuple, List, Set
+import git
+from pathlib import Path
+import pyfiglet
+import time
+import fnmatch
+import re
+from collections import defaultdict
+
+
+
+class GitignoreParser:
+    def __init__(self, repo_root: Path):
+        self.repo_root = repo_root
+        self.ignore_patterns: List[str] = []
+        self.load_gitignore()
+        
+    def load_gitignore(self):
+        """Load all .gitignore files, including global and repo-specific ones"""
+        # Start with default ignore patterns
+        self.ignore_patterns = [
+            '.git/',
+            '**/*.pyc',
+            '**/__pycache__/',
+            '**/.DS_Store'
+        ]
+        
+        # Load global gitignore if it exists
+        try:
+            global_gitignore = subprocess.check_output(
+                ['git', 'config', '--global', 'core.excludesfile'],
+                stderr=subprocess.DEVNULL,
+                text=True
+            ).strip()
+            if global_gitignore:
+                self._add_patterns_from_file(Path(global_gitignore))
+        except subprocess.CalledProcessError:
+            pass
+        
+        # Load repository .gitignore
+        gitignore_path = self.repo_root / '.gitignore'
+        if gitignore_path.exists():
+            self._add_patterns_from_file(gitignore_path)
+            
+        # Load any additional .gitignore files in subdirectories
+        for path, dirs, files in os.walk(self.repo_root):
+            if '.gitignore' in files:
+                self._add_patterns_from_file(Path(path) / '.gitignore', base_path=Path(path))
+                
+    def _add_patterns_from_file(self, file_path: Path, base_path: Path = None):
+        """Add patterns from a gitignore file"""
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#'):
+                        if base_path:
+                            # Make pattern relative to repo root
+                            rel_path = os.path.relpath(base_path, self.repo_root)
+                            if rel_path != '.':
+                                line = f"{rel_path}/{line}"
+                        self.ignore_patterns.append(line)
+        except (IOError, UnicodeDecodeError):
+            pass
+    
+    def should_ignore(self, path: str, is_dir: bool = False) -> bool:
+        """Check if a path should be ignored based on gitignore rules"""
+        path = path.replace(os.sep, '/')  # Normalize path separators
+        if is_dir and not path.endswith('/'):
+            path += '/'
+            
+        for pattern in self.ignore_patterns:
+            # Handle negation patterns
+            if pattern.startswith('!'):
+                if fnmatch.fnmatch(path, pattern[1:]):
+                    return False
+            # Handle directory-specific patterns
+            elif pattern.endswith('/'):
+                if is_dir and fnmatch.fnmatch(path, pattern):
+                    return True
+            # Handle normal patterns
+            elif fnmatch.fnmatch(path, pattern):
+                return True
+        return False
+
+class LanguageDetector:
+    def __init__(self):
+        # Language definitions with extensions and potential shebangs
+        self.languages = {
+            'Python': {
+                'extensions': {'.py', '.pyw', '.pyx', '.pxd', '.pxi'},
+                'shebangs': {'python', 'python3', 'python2'},
+                'color': '#3572A5'
+            },
+            'JavaScript': {
+                'extensions': {'.js', '.jsx', '.mjs'},
+                'color': '#F7DF1E'
+            },
+            'TypeScript': {
+                'extensions': {'.ts', '.tsx'},
+                'color': '#3178C6'
+            },
+            'Java': {
+                'extensions': {'.java'},
+                'color': '#B07219'
+            },
+            'C++': {
+                'extensions': {'.cpp', '.cxx', '.cc', '.hpp', '.hxx', '.hh'},
+                'color': '#F34B7D'
+            },
+            'C': {
+                'extensions': {'.c', '.h'},
+                'color': '#555555'
+            },
+            'Rust': {
+                'extensions': {'.rs'},
+                'color': '#DEA584'
+            },
+            'Go': {
+                'extensions': {'.go'},
+                'color': '#00ADD8'
+            },
+            'Ruby': {
+                'extensions': {'.rb'},
+                'shebangs': {'ruby'},
+                'color': '#701516'
+            },
+            'PHP': {
+                'extensions': {'.php'},
+                'color': '#4F5D95'
+            },
+            'HTML': {
+                'extensions': {'.html', '.htm'},
+                'color': '#E34C26'
+            },
+            'CSS': {
+                'extensions': {'.css'},
+                'color': '#563D7C'
+            },
+            'Shell': {
+                'extensions': {'.sh', '.bash', '.zsh'},
+                'shebangs': {'bash', 'sh', 'zsh'},
+                'color': '#89E051'
+            },
+            'Markdown': {
+                'extensions': {'.md', '.markdown'},
+                'color': '#083FA1'
+            },
+            'JSON': {
+                'extensions': {'.json'},
+                'color': '#292929'
+            },
+            'YAML': {
+                'extensions': {'.yml', '.yaml'},
+                'color': '#CB171E'
+            },
+            'Dockerfile': {
+                'filenames': {'Dockerfile'},
+                'color': '#384D54'
+            },
+            'CMake': {
+                'extensions': {'.cmake'},
+                'filenames': {'CMakeLists.txt'},
+                'color': '#DA3434'
+            }
+        }
+        
+        # Vendored patterns (files to ignore)
+        self.vendored_patterns = {
+            'node_modules/**',
+            'vendor/**',
+            'third_party/**',
+            'third-party/**',
+            'deps/**',
+            'build/**',
+            'dist/**'
+        }
+        
+        # Documentation patterns (files to ignore)
+        self.documentation_patterns = {
+            'docs/**',
+            'documentation/**',
+            'examples/**',
+            'samples/**'
+        }
+        
+        # Binary file extensions
+        self.binary_extensions = {
+            '.pyc', '.so', '.dll', '.lib', '.dylib', '.exe', '.bin',
+            '.jpg', '.jpeg', '.png', '.gif', '.ico', '.pdf', '.zip',
+            '.tar', '.gz', '.7z', '.rar'
+        }
+        
+        # Initialize regex for shebang detection
+        self.shebang_regex = re.compile(r'^#!\s*/usr/bin/env\s+(\w+)|^#!\s*/bin/(\w+)|^#!\s*/usr/bin/(\w+)')
+
+    def is_vendored(self, path: str) -> bool:
+        """Check if a file is in a vendored directory"""
+        return any(fnmatch.fnmatch(path, pattern) for pattern in self.vendored_patterns)
+
+    def is_documentation(self, path: str) -> bool:
+        """Check if a file is in a documentation directory"""
+        return any(fnmatch.fnmatch(path, pattern) for pattern in self.documentation_patterns)
+
+    def is_binary(self, path: str) -> bool:
+        """Check if a file is binary based on extension"""
+        return any(path.lower().endswith(ext) for ext in self.binary_extensions)
+
+    def detect_language(self, file_path: str, content: str = None) -> str:
+        """Detect the programming language of a file"""
+        path = Path(file_path)
+        
+        # Check specific filenames first
+        for lang, info in self.languages.items():
+            if 'filenames' in info and path.name in info['filenames']:
+                return lang
+        
+        # Check extensions
+        ext = path.suffix.lower()
+        for lang, info in self.languages.items():
+            if 'extensions' in info and ext in info['extensions']:
+                # If we have shebang patterns for this language, verify the shebang
+                if content and 'shebangs' in info:
+                    match = self.shebang_regex.match(content)
+                    if match:
+                        shebang = next(g for g in match.groups() if g)
+                        if shebang not in info['shebangs']:
+                            continue
+                return lang
+        
+        return 'Other'
+
+    def get_language_color(self, language: str) -> str:
+        """Get the color associated with a language"""
+        return self.languages.get(language, {}).get('color', '#858585')
+
+class ProjectSources:
+    def __init__(self):
+        try:
+            self.repo = git.Repo(os.getcwd(), search_parent_directories=True)
+            self.has_git = True
+            self.repo_root = Path(self.repo.working_dir)
+        except git.exc.InvalidGitRepositoryError:
+            self.has_git = False
+            self.repo_root = Path(os.getcwd())
+
+        self.language_detector = LanguageDetector()
+        # Initialize gitignore parser
+        self.gitignore = GitignoreParser(self.repo_root)
+
+    def get_language_stats(self) -> Tuple[str, bool]:
+        """Calculate language statistics for the project"""
+        try:
+            language_sizes = defaultdict(int)
+            total_size = 0
+            processed_files = 0
+            
+            for path, dirs, files in os.walk(self.repo_root):
+                rel_path = os.path.relpath(path, self.repo_root)
+                if rel_path == '.':
+                    rel_path = ''
+                
+                # Skip vendored and documentation directories
+                if self.language_detector.is_vendored(rel_path) or \
+                   self.language_detector.is_documentation(rel_path):
+                    continue
+                
+                for file in files:
+                    file_rel_path = f"{rel_path}/{file}" if rel_path else file
+                    
+                    # Skip gitignored files
+                    if self.gitignore.should_ignore(file_rel_path):
+                        continue
+                    
+                    # Skip binary files
+                    if self.language_detector.is_binary(file):
+                        continue
+                    
+                    try:
+                        file_path = Path(path) / file
+                        if not file_path.exists() or not file_path.is_file():
+                            continue
+                            
+                        size = file_path.stat().st_size
+                        
+                        # Skip empty files
+                        if size == 0:
+                            continue
+                            
+                        # Read start of file for potential shebang
+                        try:
+                            with open(file_path, 'r', encoding='utf-8') as f:
+                                first_line = f.readline()
+                        except UnicodeDecodeError:
+                            # Skip binary files that couldn't be detected by extension
+                            continue
+                            
+                        language = self.language_detector.detect_language(str(file_path), first_line)
+                        
+                        language_sizes[language] += size
+                        total_size += size
+                        processed_files += 1
+                        
+                    except (FileNotFoundError, PermissionError, OSError):
+                        continue
+            
+            if total_size == 0:
+                return ("No code files detected", False)
+            
+            # Calculate percentages and sort by size
+            language_percentages = [
+                (lang, size, (size / total_size) * 100)
+                for lang, size in language_sizes.items()
+            ]
+            language_percentages.sort(key=lambda x: x[1], reverse=True)
+            
+            # Format output string (show top 4 languages + Others)
+            output_parts = []
+            other_percentage = 0
+            
+            for i, (lang, size, percentage) in enumerate(language_percentages):
+                if i < 4:
+                    output_parts.append(f"{lang} {percentage:.1f}%")
+                else:
+                    other_percentage += percentage
+            
+            if other_percentage > 0:
+                output_parts.append(f"Other {other_percentage:.1f}%")
+            
+            return (", ".join(output_parts), False)
+            
+        except Exception as e:
+            return (f"Error calculating language stats: {str(e)}", True)
+
+    # ... rest of ProjectSources class remains the same ...
+
+    def get_project_size(self) -> Tuple[str, bool]:
+        """Calculate total project size and file counts using gitignore rules"""
+        try:
+            total_size = 0
+            file_count = 0
+            dir_count = 0
+            
+            # Skip temp files regardless of gitignore
+            temp_patterns = {'.#', '~', '.swp', '.swo'}
+            
+            for path, dirs, files in os.walk(self.repo_root):
+                rel_path = os.path.relpath(path, self.repo_root)
+                if rel_path == '.':
+                    rel_path = ''
+                
+                # Filter directories using gitignore rules
+                dirs[:] = [d for d in dirs 
+                          if not any(pattern in d for pattern in temp_patterns) and
+                          not self.gitignore.should_ignore(f"{rel_path}/{d}" if rel_path else d, True)]
+                
+                # Count remaining directories
+                dir_count += len(dirs)
+                
+                # Filter and process files
+                for file in files:
+                    # Skip temp files
+                    if any(pattern in file for pattern in temp_patterns):
+                        continue
+                        
+                    file_rel_path = f"{rel_path}/{file}" if rel_path else file
+                    
+                    # Check against gitignore rules
+                    if self.gitignore.should_ignore(file_rel_path):
+                        continue
+                    
+                    try:
+                        file_path = Path(path) / file
+                        if file_path.exists() and file_path.is_file():
+                            total_size += file_path.stat().st_size
+                            file_count += 1
+                    except (FileNotFoundError, PermissionError, OSError):
+                        continue
+
+            # Convert to human readable size
+            units = ['B', 'KB', 'MB', 'GB', 'TB']
+            size_index = 0
+            size_float = float(total_size)
+            while size_float > 1024 and size_index < len(units) - 1:
+                size_float /= 1024
+                size_index += 1
+            
+            return (f"{size_float:.2f} {units[size_index]} ({file_count} files, {dir_count} dirs)", False)
+        except Exception as e:
+            return (f"Error calculating size: {str(e)}", True)
+
+    def get_project_name(self) -> Tuple[str, bool]:
+        """Get project name from either git config or directory name"""
+        if self.has_git:
+            try:
+                # Try to get from git config first
+                config_name = self.repo.config_reader().get_value("projectfetch", "name", None)
+                if config_name:
+                    return (config_name, False)
+            except:
+                pass
+        
+        # Fallback to directory name
+        return (self.repo_root.name, False)
+
+    def get_git_info(self) -> Tuple[str, bool]:
+        """Returns (info_string, is_stubbed)"""
+        if not self.has_git:
+            return ("No Git repository found", True)
+        
+        try:
+            # Get current branch
+            branch = self.repo.active_branch.name
+            
+            # Get remote tracking branch
+            tracking_branch = self.repo.active_branch.tracking_branch()
+            if tracking_branch:
+                # Get ahead/behind counts
+                commits_behind = len(list(self.repo.iter_commits(f'{branch}..{tracking_branch.name}')))
+                commits_ahead = len(list(self.repo.iter_commits(f'{tracking_branch.name}..{branch}')))
+                
+                # Get status (clean/dirty)
+                status = "dirty" if self.repo.is_dirty() else "clean"
+                
+                return (f"{branch} ({commits_ahead} ahead, {commits_behind} behind) - {status}", False)
+            else:
+                status = "dirty" if self.repo.is_dirty() else "clean"
+                return (f"{branch} (no tracking branch) - {status}", False)
+                
+        except Exception as e:
+            return (f"Error reading Git info: {str(e)}", True)
+    
+    def get_last_commit(self) -> Tuple[str, bool]:
+        """Get information about the last commit"""
+        if not self.has_git:
+            return ("No Git repository found", True)
+            
+        try:
+            last_commit = self.repo.head.commit
+            timestamp = last_commit.committed_datetime
+            
+            # Calculate time difference
+            now = datetime.now(timestamp.tzinfo)
+            diff = now - timestamp
+            
+            # Format time difference
+            if diff.days > 365:
+                time_str = f"{diff.days // 365} years ago"
+            elif diff.days > 30:
+                time_str = f"{diff.days // 30} months ago"
+            elif diff.days > 0:
+                time_str = f"{diff.days} days ago"
+            elif diff.seconds > 3600:
+                time_str = f"{diff.seconds // 3600} hours ago"
+            elif diff.seconds > 60:
+                time_str = f"{diff.seconds // 60} minutes ago"
+            else:
+                time_str = f"{diff.seconds} seconds ago"
+            
+            return (f"{time_str} by {last_commit.author.name} - {last_commit.message.split(chr(10))[0]}", False)
+        except Exception as e:
+            return (f"Error reading last commit: {str(e)}", True)
+
+    def get_dependencies(self) -> Tuple[str, bool]:
+        return ("42 direct, 156 total", True)
+    
+    def get_test_coverage(self) -> Tuple[str, bool]:
+        return ("87.5%", True)
+    
+    def get_code_quality(self) -> Tuple[str, bool]:
+        return ("A+ (98.2/100)", True)
+    
+    def get_documentation(self) -> Tuple[str, bool]:
+        return ("84% documented", True)
+    
+    def get_ci_status(self) -> Tuple[str, bool]:
+        return ("passing (build #452)", True)
+    
+    def get_contributors(self) -> Tuple[str, bool]:
+        return ("8 active, 15 total", True)
+    
+    def get_license(self) -> Tuple[str, bool]:
+        """Detect project license"""
+        common_license_files = [
+            'LICENSE', 'LICENSE.txt', 'LICENSE.md',
+            'COPYING', 'COPYING.txt', 'COPYING.md'
+        ]
+        
+        try:
+            # First check for license files
+            for license_file in common_license_files:
+                license_path = self.repo_root / license_file
+                if license_path.exists():
+                    # Read first line or first 100 chars to try to identify license
+                    content = license_path.read_text(encoding='utf-8', errors='ignore')[:100].upper()
+                    
+                    # Common license identifiers
+                    if 'MIT' in content:
+                        return ("MIT", False)
+                    elif 'APACHE' in content:
+                        return ("Apache", False)
+                    elif 'GPL' in content:
+                        return ("GPL", False)
+                    elif 'BSD' in content:
+                        return ("BSD", False)
+                    else:
+                        return (f"Custom ({license_file} present)", False)
+            
+            # Check package.json if it exists
+            package_json = self.repo_root / 'package.json'
+            if package_json.exists():
+                import json
+                with open(package_json) as f:
+                    data = json.load(f)
+                    if 'license' in data:
+                        return (data['license'], False)
+            
+            return ("No license detected", False)
+        except Exception as e:
+            return (f"Error detecting license: {str(e)}", True)
+    
+    def get_latest_release(self) -> Tuple[str, bool]:
+        return ("v2.1.0 (stable)", True)
+    
+    def get_open_issues(self) -> Tuple[str, bool]:
+        return ("24 open, 156 closed", True)
+    
+    def get_security_score(self) -> Tuple[str, bool]:
+        return ("A (95/100)", True)
+
+def generate_ascii_logo(text: str) -> list[str]:
+    """Generate ASCII art logo using figlet"""
+    try:
+        f = pyfiglet.Figlet(font='standard')
+        return f.renderText(text).rstrip().split('\n')
+    except Exception:
+        # Fallback to simple ASCII art if figlet fails
+        return [
+            f"--- {text} ---"
+        ]
+
+class ProjectFetch:
+    def __init__(self):
+        self.console = Console()
+        self.sources = ProjectSources()
+        
+        # Define the information to display with their corresponding source functions
+        self.info_sources: Dict[str, Callable[[], Tuple[str, bool]]] = {
+            "Project Name": self.sources.get_project_name,
+            "Git Status": self.sources.get_git_info,
+            "Project Size": self.sources.get_project_size,
+            "Last Commit": self.sources.get_last_commit,
+            "Dependencies": self.sources.get_dependencies,
+            "Test Coverage": self.sources.get_test_coverage,
+            "Code Quality": self.sources.get_code_quality,
+            "Documentation": self.sources.get_documentation,
+            "CI Status": self.sources.get_ci_status,
+            "Language Stats": self.sources.get_language_stats,
+            "Contributors": self.sources.get_contributors,
+            "License": self.sources.get_license,
+            "Latest Release": self.sources.get_latest_release,
+            "Open Issues": self.sources.get_open_issues,
+            "Security Score": self.sources.get_security_score
+        }
+
+    def render(self):
+        # Get project name for logo
+        project_name, _ = self.sources.get_project_name()
+        logo = generate_ascii_logo(project_name)
+        max_logo_width = max(len(line) for line in logo)
+        
+        # Create combined Text object for info panel
+        info_text = Text()
+        first = True
+        for key, source_func in self.info_sources.items():
+            value, is_stubbed = source_func()
+            if not first and not is_stubbed:
+                info_text.append("\n")
+            first = False
+            
+            if not is_stubbed:
+                info_text.append(f"{key}: ")
+                info_text.append(value, style="green")
+
+        
+        # Create two columns: logo and information
+        logo_panel = Panel("\n".join(logo), border_style="blue", padding=(0, 2))
+        info_panel = Panel(info_text, border_style="blue", padding=(0, 2))
+        
+        # Render the layout
+        layout = Columns([logo_panel, info_panel])
+        self.console.print(layout)
+
+def main():
+    fetcher = ProjectFetch()
+    fetcher.render()
+
+if __name__ == "__main__":
+    main()
